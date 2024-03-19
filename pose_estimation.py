@@ -1,5 +1,5 @@
 """
-This script detects the ArUco marker and pose estimate the translationa and rotational vectors of the marker respective to the camera.
+This script detects the ArUco marker and pose estimate the translational (cartesian & polar coordinates) and rotational vectors of the marker respective to the camera.
 This script can be divided into three sections:
     1) Definitions
         - Define the marker size and dictionary
@@ -9,9 +9,13 @@ This script can be divided into three sections:
 
     3) Execution
         - Initialize the camera
-        - Detect any ArUco marker present in the camera frame by drawing polylines.
-        - Pose estimate and print out the translational and rotational values of the marker
+        - Detect any ArUco marker present in the camera frame by drawing polylines and frame axes
+        - Pose estimate and print out the translational (cartesian & polar coordinates) and rotational values of the marker
         - Annotate the pose for better visualization purposes
+
+Quick note regarding the main difference between Jetson Nano & Raspberry Pi, to initialize the camera:
+    - The IMX camera module, connected to a Jetson Nano uses the imutils video stream function
+    - The Raspberry Pi (RPI) V2 camera module uses the picamera library
 
 Created by: Jalen
 """
@@ -24,7 +28,8 @@ import os
 # Third-Party Imports
 import cv2
 import numpy as np
-from imutils.video import VideoStream
+from picamera import PiCamera
+from picamera.array import PiRGBArray
 import yaml
 
 # Project-Specific Imports
@@ -54,8 +59,12 @@ print("Loaded calibration data successfully")
 
 
 # EXECUTION ------------------------------------------------------------------------------------------------------------
-# Initialize the camera
-vs = VideoStream("nvarguscamerasrc ! video/x-raw(memory:NVMM), width=(int)500, height=(int)500,format=(string)NV12, framerate=(fraction)30/1 ! nvvidconv ! video/x-raw, format=(string)BGRx ! videoconvert !  appsink").start()
+# Initialize the picamera
+camera = PiCamera()
+camera.resolution = (640, 480)
+camera.framerate = 32
+camera.rotation = 180
+raw_capture = PiRGBArray(camera, size=(640, 480))
 time.sleep(2)
 
 last_print_time = time.time()
@@ -68,13 +77,9 @@ last_print_time = time.time()
 # # 10s framerate, 1000x800 resolution
 # result = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*'MJPG'), 10, (1000, 800))     
 
-while True:
-    
-    frame = vs.read()
-    # MUST be similar resolution to videowriter object
-    frame = cv2.resize(frame, (1000, 800))      
-    
-    gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+for frame in camera.capture_continuous(raw_capture, format="bgr", use_video_port=True):
+    image = frame.array
+    gray_frame = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     (corners, ids, rejected) = cv2.aruco.detectMarkers(image=gray_frame,
                                                        dictionary=arucoDict,
                                                        parameters=arucoParams)
@@ -91,8 +96,24 @@ while True:
         current_time = time.time()
         if current_time - last_print_time >= 2.0:
             for markerID, i in zip(ids, total_markers):
+
+                #  Translation vector coordinates
+                translation_vector = tVec[i].flatten()
+                x, y, z = translation_vector
+
+                # Calculate radius (R)
+                R = np.sqrt(x**2 + y**2 + z**2)
+        
+                # Calculate polar angle (theta) in radians
+                theta = np.arctan2(y, x)  # arctan2 ensures correct usage of four quadrants
+        
+                # Convert theta to degrees for better readability
+                theta_degrees = np.degrees(theta)
+
                 print(f"Marker ID: {markerID}")
-                print(f"Translation Vector (tvec): {tVec[i].flatten()}")
+                print(f"Translation Vector (Cartesian): {translation_vector} mm")
+                print(f"Translation Vector (Polar): R = {R} mm, θ = {theta_degrees} degrees")
+                print("-----------------------------")
 
                 # print("Translation Vector (tvec):")
                 # for value in tVec.flatten():
@@ -101,9 +122,12 @@ while True:
                 # print("Rotation Vector (rvec):")
                 # for value in rVec.flatten():
                 #     print(f"    {value}")
-                
-                print("-----------------------------")
-                last_print_time = current_time
+            
+            # For better visualization purposes by separating out every time step of 2 seconds
+            print()
+            print()
+            print()
+            last_print_time = current_time
 
         
         for markerID, corner, i in zip(ids, corners, total_markers):
@@ -112,27 +136,22 @@ while True:
 
             # Draw polylines on marker for better visualization
             cv2.polylines(
-                frame, [corner.astype(np.int32)], isClosed=True, color=(0, 255, 255), thickness=5, lineType=cv2.LINE_AA
+                image, [corner.astype(np.int32)], isClosed=True, color=(0, 255, 255), thickness=3, lineType=cv2.LINE_AA
             )
 
             # Annotate Pose
-            cv2.drawFrameAxes(frame, camMatrix, distCof, rVec[i], tVec[i], length=50, thickness=5)
+            cv2.drawFrameAxes(image, camMatrix, distCof, rVec[i], tVec[i], length=50, thickness=3)
 
-            # # Draw a cross-mark at the centre of the frame (reference purposes only)
-            # camera_center_x, camera_centre_y = camMatrix[0,2], camMatrix[1,2]
-            # cv2.drawMarker(frame, (int(camera_center_x), int(camera_centre_y)), color=(0, 255, 0), markerType=cv2.MARKER_CROSS, markerSize=20, thickness=2)
-    
-    # result.write(frame)
-
-    cv2.imshow("Pose Estimation Frame", frame)
+    cv2.imshow("Pose Estimation Frame", image)
 
     # Terminate program and cleanup when 'q' is pressed
     key = cv2.waitKey(1)
     if key == ord('q'):
         break
 
-vs.release()
-# result.release()
+    # Clear the stream for the next frame
+    raw_capture.truncate(0)
 
 cv2.destroyAllWindows()
 vs.stop()
+
